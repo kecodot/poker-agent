@@ -1,13 +1,12 @@
-"""Decision engine — combines all modules into a single decision pipeline.
+"""Decision engine — continuous strategy mixing pipeline.
 
 The decision engine:
   1. Extracts game state from the table dict
-  2. Identifies relevant context (position, stacks, opponents)
-  3. Routes to the appropriate street strategy
-  4. Validates the action against allowed actions
-  5. Generates Arena-compliant reasoning
-
-This is the single entry point that decide() calls.
+  2. Classifies opponent pool (passive/aggressive/mixed)
+  3. Computes contextual strategy weights via StrategyMixer
+  4. Runs all three strategies and blends via weighted voting
+  5. Validates the action against allowed actions
+  6. Generates Arena-compliant reasoning with explainer log
 """
 
 from __future__ import annotations
@@ -20,12 +19,39 @@ from ..engine.hand_evaluator import _hand_class, static_preflop_equity
 from ..engine.equity_calculator import compute_full_equity, compute_pot_odds
 from ..engine.range_engine import seat_to_position, hand_class
 from ..engine.opponent_model import OpponentModel
-from ..strategy.preflop import decide_preflop, PreflopDecision
-from ..strategy.flop import decide_flop, FlopDecision, _board_texture
-from ..strategy.turn import decide_turn, TurnDecision
-from ..strategy.river import decide_river, RiverDecision
+from ..strategy.strategy_router import (
+    classify_and_select,
+    MODE_LIMP_VALUE,
+    MODE_RAISE_EXPLOIT,
+    MODE_HYBRID,
+)
+from ..strategy.strategy_mixer import StrategyMixer, StrategyVote, BlendedDecision
 
 FALLBACK_REASONING = '{vr: "std", ke: "legal", pp: "pot control"}'
+
+# Track which strategy mode is dominant (for performance evaluation)
+_active_strategy_mode: str = MODE_HYBRID
+_active_pool_classification: Optional[dict] = None
+_active_strategy_weights: dict[str, float] = {"limp_value": 0.33, "raise_exploit": 0.33, "hybrid": 0.34}
+
+
+def get_active_mode() -> str:
+    """Return the dominant strategy mode (highest weight)."""
+    global _active_strategy_weights
+    w = _active_strategy_weights
+    if not w:
+        return MODE_HYBRID
+    return max(w, key=w.get)
+
+
+def get_active_pool() -> Optional[dict]:
+    """Return the current pool classification."""
+    return _active_pool_classification
+
+
+def get_active_weights() -> dict[str, float]:
+    """Return the current strategy weights for explainability."""
+    return dict(_active_strategy_weights)
 
 
 class DecisionEngine:
@@ -40,6 +66,7 @@ class DecisionEngine:
         self.config = config or {}
         self.decision_count = 0
         self.total_decision_time_ms = 0.0
+        self.mixer = StrategyMixer()
 
     def decide(self, table: dict, deadline_s: float = 10.0) -> dict:
         """Main decision function — Arena-compatible interface.
@@ -89,8 +116,8 @@ class DecisionEngine:
         stack_depth_bb = effective_stack / max(big_blind, 1)
         n_players = len([s for s in seats if (s.get("stackChips") or 0) > 0])
 
-        # Position
-        self_position = seat_to_position(self_seat_num, n_players)
+        # Position — use table override if provided (stress test passes actual position)
+        self_position = table.get("selfPosition") or seat_to_position(self_seat_num, n_players)
 
         # Determine street
         street = table.get("street") or "Preflop"
@@ -120,43 +147,70 @@ class DecisionEngine:
                 if fcb != "unknown":
                     fold_to_cbet_data[snum] = fcb
 
-        # ─── Delegate to street strategy ───────────────────────────
+        # ─── Pool classification ──────────────────────────────────
+        opponent_bot_types = table.get("opponentBotTypes") or {}
+        strategy_mode, pool = classify_and_select(
+            opponent_archetypes=opponent_archetypes,
+            opponent_bot_types=opponent_bot_types,
+            self_position=self_position,
+            stack_depth_bb=stack_depth_bb,
+        )
+        global _active_strategy_mode, _active_pool_classification, _active_strategy_weights
+        _active_strategy_mode = strategy_mode
+        _active_pool_classification = {
+            "pool_type": pool.pool_type,
+            "confidence": pool.confidence,
+            "reasoning": pool.reasoning,
+            "opponent_types": pool.opponent_types,
+            "passive_count": pool.passive_count,
+            "aggressive_count": pool.aggressive_count,
+        }
+
+        # ─── Continuous strategy mixing (replaces hard routing) ─────
         try:
-            if street == "Preflop":
-                decision = decide_preflop(
-                    hole=hole,
-                    table=table,
-                    opponent_archetypes=opponent_archetypes,
-                    stack_depth_bb=stack_depth_bb,
-                    self_position=self_position,
-                )
-            elif street == "Flop":
-                decision = decide_flop(
-                    hole=hole,
-                    table=table,
-                    opponent_archetypes=opponent_archetypes,
-                    stack_depth_bb=stack_depth_bb,
-                    self_position=self_position,
-                    is_aggressor=is_aggressor,
-                )
-            elif street == "Turn":
-                decision = decide_turn(
-                    hole=hole,
-                    table=table,
-                    opponent_archetypes=opponent_archetypes,
-                    stack_depth_bb=stack_depth_bb,
-                    self_position=self_position,
-                    is_aggressor=is_aggressor,
-                )
-            else:  # River
-                decision = decide_river(
-                    hole=hole,
-                    table=table,
-                    opponent_archetypes=opponent_archetypes,
-                    stack_depth_bb=stack_depth_bb,
-                    self_position=self_position,
-                    is_aggressor=is_aggressor,
-                )
+            # Estimate hand strength for weight computation
+            hand_strength = self._estimate_hand_strength(hole, board, street)
+
+            # Compute pot-to-stack ratio
+            pot_to_stack = pot / max(effective_stack, 1)
+
+            # Estimate table aggression from opponent data
+            table_aggression = 0.5
+            if pool.pool_type == "aggressive":
+                table_aggression = 0.75
+            elif pool.pool_type == "passive":
+                table_aggression = 0.25
+
+            # Contextual weights (Task 2)
+            raw_weights = self.mixer.compute_weights(
+                pool_type=pool.pool_type,
+                confidence=pool.confidence,
+                position=self_position,
+                stack_depth_bb=stack_depth_bb,
+                hand_strength=hand_strength,
+                street=street,
+                pot_to_stack=pot_to_stack,
+                table_aggression=table_aggression,
+            )
+
+            # Smooth transition (Task 3)
+            weights = self.mixer.smooth_weights(raw_weights, pool.pool_type, pool.confidence)
+            _active_strategy_weights = dict(weights)
+            _active_strategy_mode = max(weights, key=weights.get)
+
+            # Task 4: aggressive matchup fix — blend raise_exploit with limp_value
+            if pool.pool_type == "aggressive" and hand_strength < 0.65:
+                weights = self._aggressive_blend(weights)
+
+            # Run all three strategies
+            votes = self._run_all_strategies(
+                hole, table, board, street, self_position,
+                opponent_archetypes, stack_depth_bb, is_aggressor,
+            )
+
+            # Blend (Task 1)
+            blended = self.mixer.blend(votes, weights)
+
         except Exception:
             # Any strategy exception → fallback to safe action
             result = self._safe_fallback(allowed, available, pot, call_chips)
@@ -164,47 +218,115 @@ class DecisionEngine:
             return result
 
         # ─── Validate and build result ─────────────────────────────
-        result = self._validate_and_build(
-            decision, allowed, available, table, hole, board, street, self_position
+        result = self._validate_and_build_blended(
+            blended, allowed, available, table, hole, board, street, self_position
         )
         self._record_timing(t0)
         return result
 
-    def _determine_aggressor(self, table: dict, position: str, street: str) -> bool:
-        """Heuristic: are we the preflop raiser (and thus the natural c-bettor)?
+    def _estimate_hand_strength(self, hole: list[str], board: list[str],
+                                 street: str) -> float:
+        """Quick hand strength estimate for weight computation (0.0-1.0)."""
+        if not board:
+            # Preflop: use simple heuristic
+            from ..strategy.limp_value import _preflop_strength
+            return _preflop_strength(hole)
+        from ..strategy.limp_value import _postflop_strength
+        return _postflop_strength(hole, board)
 
-        We can't see opponent hole cards, but we can estimate from action context.
+    def _run_all_strategies(
+        self, hole: list[str], table: dict, board: list[str],
+        street: str, self_position: str,
+        opponent_archetypes: dict[str, str],
+        stack_depth_bb: float, is_aggressor: bool,
+    ) -> list[StrategyVote]:
+        """Run all three strategies and return their votes."""
+        votes: list[StrategyVote] = []
+
+        # ── Limp-Value ──────────────────────────────────────────
+        try:
+            from ..strategy.limp_value import (
+                decide_preflop_limp_value, decide_flop_limp_value,
+                decide_turn_limp_value, decide_river_limp_value,
+            )
+            if street == "Preflop":
+                lv = decide_preflop_limp_value(hole, table, opponent_archetypes, stack_depth_bb, self_position)
+            elif street == "Flop":
+                lv = decide_flop_limp_value(hole, table, opponent_archetypes, stack_depth_bb, self_position, is_aggressor)
+            elif street == "Turn":
+                lv = decide_turn_limp_value(hole, table, opponent_archetypes, stack_depth_bb, self_position, is_aggressor)
+            else:
+                lv = decide_river_limp_value(hole, table, opponent_archetypes, stack_depth_bb, self_position, is_aggressor)
+            votes.append(StrategyVote(lv.action, lv.amount, lv.confidence, lv.reasoning, "limp_value"))
+        except Exception:
+            votes.append(StrategyVote("fold", None, 0.0, "limp_value error", "limp_value"))
+
+        # ── Raise-Exploit ───────────────────────────────────────
+        try:
+            from ..strategy.preflop import decide_preflop
+            from ..strategy.flop import decide_flop
+            from ..strategy.turn import decide_turn
+            from ..strategy.river import decide_river
+            if street == "Preflop":
+                re = decide_preflop(hole, table, opponent_archetypes, stack_depth_bb, self_position)
+            elif street == "Flop":
+                re = decide_flop(hole, table, opponent_archetypes, stack_depth_bb, self_position, is_aggressor)
+            elif street == "Turn":
+                re = decide_turn(hole, table, opponent_archetypes, stack_depth_bb, self_position, is_aggressor)
+            else:
+                re = decide_river(hole, table, opponent_archetypes, stack_depth_bb, self_position, is_aggressor)
+            votes.append(StrategyVote(re.action, re.amount, re.confidence, re.reasoning, "raise_exploit"))
+        except Exception:
+            votes.append(StrategyVote("fold", None, 0.0, "raise_exploit error", "raise_exploit"))
+
+        # ── Hybrid ──────────────────────────────────────────────
+        try:
+            from ..strategy.hybrid import (
+                decide_preflop_hybrid, decide_flop_hybrid,
+                decide_turn_hybrid, decide_river_hybrid,
+            )
+            if street == "Preflop":
+                hy = decide_preflop_hybrid(hole, table, opponent_archetypes, stack_depth_bb, self_position)
+            elif street == "Flop":
+                hy = decide_flop_hybrid(hole, table, opponent_archetypes, stack_depth_bb, self_position, is_aggressor)
+            elif street == "Turn":
+                hy = decide_turn_hybrid(hole, table, opponent_archetypes, stack_depth_bb, self_position, is_aggressor)
+            else:
+                hy = decide_river_hybrid(hole, table, opponent_archetypes, stack_depth_bb, self_position, is_aggressor)
+            votes.append(StrategyVote(hy.action, hy.amount, hy.confidence, hy.reasoning, "hybrid"))
+        except Exception:
+            votes.append(StrategyVote("fold", None, 0.0, "hybrid error", "hybrid"))
+
+        return votes
+
+    def _aggressive_blend(self, weights: dict[str, float]) -> dict[str, float]:
+        """Task 4: Blend raise_exploit with limp_value vs aggressive opponents.
+
+        Against LAG/Maniac, pure aggression feeds their strategy.
+        Blending toward limp_value increases trap frequency — call their
+        bluffs, don't build pots they can steal.
         """
-        if street == "Preflop":
-            return False
-        allowed = table.get("allowedActions") or {}
-        call_chips = allowed.get("callChips", 0)
-        # If no one bet and we can bet → we likely have initiative
-        if call_chips == 0 and allowed.get("canBet", False):
-            return True
-        # If we can raise → someone else bet, they have initiative
-        if allowed.get("canRaise", False):
-            return False
-        return False
+        w = dict(weights)
+        # Shift 30% of raise_exploit weight → limp_value
+        shift = w["raise_exploit"] * 0.30
+        w["raise_exploit"] -= shift
+        w["limp_value"] += shift
+        # Normalize
+        total = sum(w.values())
+        return {k: v / total for k, v in w.items()}
 
-    def _validate_and_build(
-        self,
-        decision,
-        allowed: dict,
-        available: list,
-        table: dict,
-        hole: list[str],
-        board: list[str],
-        street: str,
-        position: str,
+    def _validate_and_build_blended(
+        self, blended: BlendedDecision,
+        allowed: dict, available: list,
+        table: dict, hole: list[str], board: list[str],
+        street: str, position: str,
     ) -> dict:
-        """Validate the strategy decision against allowed actions and build Arena response."""
-        action_name = decision.action
-        amount = decision.amount
+        """Validate the blended decision and build Arena response with explainer log."""
+        action_name = blended.action
+        amount = blended.amount
 
-        # Check if action is in available actions
+        # Check if action is in available actions (same fallback logic)
         if action_name not in available:
-            # Map common alternatives
             alternatives = {
                 "bet": ["raise", "call", "check", "fold"],
                 "raise": ["bet", "call", "check", "fold"],
@@ -232,37 +354,35 @@ class DecisionEngine:
                 amount = lo
             amount = max(lo, min(int(amount), hi))
 
-        # Strip amount for fold/check/call
         if action_name in ("fold", "check", "call"):
             amount = None
         if action_name == "all-in":
-            amount = None  # Server handles all-in sizing
+            amount = None
 
-        # Build reasoning
-        reasoning = self._build_reasoning(
-            action_name, decision, hole, board, street, position
+        # Build reasoning with explainer log (Task 5)
+        reasoning = self._build_reasoning_blended(
+            action_name, blended, hole, board, street, position
         )
 
         payload: dict = {
             "action": action_name,
-            "message": decision.reasoning[:500],
+            "message": blended.reasoning[:500],
             "reasoning": reasoning,
+            # Strategy explainer log (Task 5)
+            "strategy_weights": blended.weights_used,
+            "strategy_votes": blended.votes,
+            "blend_method": blended.blend_method,
         }
         if amount is not None:
             payload["amount"] = int(amount)
 
         return payload
 
-    def _build_reasoning(
-        self,
-        action_name: str,
-        decision,
-        hole: list[str],
-        board: list[str],
-        street: str,
-        position: str,
+    def _build_reasoning_blended(
+        self, action_name: str, blended: BlendedDecision,
+        hole: list[str], board: list[str], street: str, position: str,
     ) -> str:
-        """Build Arena-compliant YAML flow-style reasoning string (≤150 chars)."""
+        """Build Arena-compliant reasoning string with blend info (≤150 chars)."""
         cls = hand_class(hole) if hole else "??"
 
         # Board features
@@ -289,34 +409,60 @@ class DecisionEngine:
                     "Turn": "ck R", "River": "showdown"}
         pp_str = f"{pos_abbr} {plan_map.get(street, 'pot ctrl')}"[:30]
 
-        # Sizing reason
-        sr_str = ""
-        if action_name in ("bet", "raise", "all-in"):
-            sr_str = "sized for FE"[:30]
-        elif action_name == "call":
-            sr_str = "covered"[:30]
+        # Blend signature: dominant strategy + method
+        dominant = max(blended.weights_used, key=blended.weights_used.get)
+        blend_tag = f"mx:{dominant[:4]}"[:8]
 
         parts = [
             f'vr: "ln:{position.lower()}"',
             f'ke: "{ke_str}"',
             f'bf: {bf_str}',
             f'pp: "{pp_str}"',
+            f'{blend_tag}',
         ]
-        if sr_str:
-            parts.append(f'sr: "{sr_str}"')
+        if blended.blend_method != "majority":
+            parts.append(f"how:{blended.blend_method[:6]}")
 
         yaml = "{" + ", ".join(parts) + "}"
         if len(yaml) <= 150:
             return yaml
 
-        # Trim to fit
-        for drop_i in (4, 2):
+        for drop_i in (5, 4, 2):
             if drop_i < len(parts):
                 trimmed = parts[:drop_i] + parts[drop_i + 1:]
                 candidate = "{" + ", ".join(trimmed) + "}"
                 if len(candidate) <= 150:
                     return candidate
         return FALLBACK_REASONING
+
+    def _determine_aggressor(self, table: dict, position: str, street: str) -> bool:
+        """Heuristic: are we the preflop raiser (and thus the natural c-bettor)?
+
+        Uses explicit flag from simulation if available, otherwise estimates
+        from action context.
+        """
+        if street == "Preflop":
+            return False
+
+        # Check explicit flag from simulation
+        allowed = table.get("allowedActions") or {}
+        if allowed.get("heroRaisedPreflop"):
+            return True
+
+        call_chips = allowed.get("callChips", 0)
+        # In position (BTN/CO) facing no bet → likely our initiative
+        if call_chips == 0 and allowed.get("canBet", False) and position in ("BTN", "CO"):
+            return True
+        # In position facing a donk bet → we still have initiative
+        if allowed.get("canRaise", False) and position in ("BTN", "CO"):
+            return True
+        # Out of position with chance to bet → may have initiative (check)
+        if call_chips == 0 and allowed.get("canBet", False):
+            return True
+        # Facing a bet out of position → opponent has initiative
+        if allowed.get("canRaise", False):
+            return False
+        return False
 
     def _deadline_action(self, table: dict) -> dict:
         """Emergency action when deadline is too tight."""

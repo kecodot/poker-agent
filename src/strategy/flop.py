@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import Optional
 
@@ -59,7 +60,7 @@ def _board_texture(board: list[str]) -> str:
     if two_tone_flush:
         return "neutral"
 
-    # Rainbow unconnected → dry
+    # Rainbow unconnected -> dry
     return "dry"
 
 
@@ -233,51 +234,42 @@ def decide_flop(
 
     size_frac = _flop_sizing(texture, "flop")
     bet_size = int(pot * size_frac)
+    in_position = self_position in ("BTN", "CO")
 
-    # ─── Unopened (can check or bet) ───────────────────────────────
+    # --- Unopened (can check or bet) ---------------------------------
     if call_chips == 0:
-        # Strong hand → value bet
-        if interaction["has_set"] or interaction["has_2pair"] or interaction["pair_type"] == "top":
-            if "bet" in available:
-                return FlopDecision("bet", bet_size,
-                    f"value bet {interaction['pair_type']} on {texture} flop", 0.9)
+        # Value-oriented: only bet when we have significant equity or made hand
+        has_strong = (interaction["has_set"] or interaction["has_2pair"] or
+                      interaction["pair_type"] == "top" or
+                      interaction["strength"] > 0.70)
 
-        # Medium strength → c-bet if aggressor or value bet thin
-        if interaction["has_pair"] and interaction["pair_type"] in ("middle", "bottom"):
-            if is_aggressor and "bet" in available:
-                return FlopDecision("bet", int(pot * _flop_sizing(texture, "flop") * 0.7),
-                    f"cbet {interaction['pair_type']} pair on {texture}",
-                    0.7)
-            if "check" in available:
-                return FlopDecision("check", None,
-                    f"pot-control {interaction['pair_type']} pair on {texture}", 0.6)
+        if has_strong and "bet" in available:
+            vbet_frac = 0.50 if texture == "dry" else _flop_sizing(texture, "flop")
+            return FlopDecision("bet", int(pot * vbet_frac),
+                f"value bet {interaction['hand_class']} on {texture} flop", 0.85)
 
-        # Draw → semi-bluff or check
-        if interaction["has_draw"]:
-            if is_aggressor and "bet" in available:
-                # Semi-bluff with draw
-                return FlopDecision("bet", int(pot * _flop_sizing(texture, "flop") * 0.8),
-                    f"semi-bluff {interaction['draw_type']} draw on {texture}", 0.65)
-            if "check" in available:
-                return FlopDecision("check", None,
-                    f"check {interaction['draw_type']} draw on {texture}", 0.55)
+        # Aggressor with pair/draw on dry boards: small c-bet
+        if is_aggressor and in_position and "bet" in available:
+            if interaction["has_draw"] and random.random() < 0.40:
+                return FlopDecision("bet", int(pot * 0.40),
+                    f"semi-bluff {interaction['draw_type']} draw", 0.55)
+            if (interaction["has_pair"] and
+                  interaction["pair_type"] in ("middle", "bottom") and
+                  texture == "dry"):
+                return FlopDecision("bet", int(pot * 0.35),
+                    f"cbet {interaction['pair_type']} pair on dry flop", 0.60)
 
-        # Dry flop aggression (c-bet bluff)
-        if is_aggressor and texture == "dry" and "bet" in available:
-            return FlopDecision("bet", int(pot * 0.33),
-                f"dry flop cbet bluff", 0.55)
-
-        # Default: check
+        # Default: check and realize equity with position
         if "check" in available:
             return FlopDecision("check", None,
-                f"check {texture} flop", 0.7)
+                f"check {texture} flop", 0.75)
 
         return FlopDecision("fold", None, "no free option", 0.5)
 
-    # ─── Facing a bet ──────────────────────────────────────────────
+    # --- Facing a bet -------------------------------------------------
     pot_odds = compute_pot_odds(call_chips, pot)
 
-    # Strong hands → raise
+    # Strong hands -> raise
     if interaction["has_set"] or interaction["has_2pair"]:
         if "raise" in available:
             rr = allowed.get("raiseRange") or {}
@@ -290,7 +282,7 @@ def decide_flop(
             return FlopDecision("call", None,
                 f"call {interaction['hand_class']} (raise not available)", 0.85)
 
-    # Top pair → call or raise
+    # Top pair -> call or raise
     if interaction["pair_type"] == "top":
         if equity_result.equity > 0.70 and "raise" in available:
             rr = allowed.get("raiseRange") or {}
@@ -303,31 +295,29 @@ def decide_flop(
             return FlopDecision("call", None,
                 f"call top pair, {equity_result.equity:.0%} vs {pot_odds:.0%}", 0.7)
 
-    # Draw → call with implied odds
+    # Draw -> call with implied odds
     if interaction["has_draw"] and equity_result.has_implied_odds:
         if "call" in available:
             return FlopDecision("call", None,
                 f"draw {interaction['draw_type']}, implied odds", 0.55)
 
-    # Middle/bottom pair → call if cheap
-    if interaction["has_pair"] and "call" in available:
-        if call_chips <= pot * 0.4:
-            return FlopDecision("call", None,
-                f"call {interaction['pair_type']} pair, cheap price", 0.45)
-
-    # Float bluff in position vs certain player types
-    if (self_position in ("BTN", "CO") and
-            villain_archetype in ("Nit", "TAG") and
-            "call" in available and
-            call_chips <= pot * 0.5):
+    # Float bluff in position vs nitty/TAG players
+    if (in_position and villain_archetype in ("Nit", "TAG") and
+            "call" in available and call_chips <= pot * 0.5):
         if not interaction["has_pair"] and not interaction["has_draw"]:
-            # Float: call flop to steal turn
-            pass  # Keep evaluating
+            return FlopDecision("call", None,
+                f"float {texture} flop vs {villain_archetype}", 0.4)
 
     # General: call if equity > pot_odds
     if equity_result.has_direct_odds and "call" in available:
         return FlopDecision("call", None,
             f"call, {equity_result.equity:.0%} eq vs {pot_odds:.0%} po", 0.55)
+
+    # Any pair or draw at reasonable price
+    if (interaction["has_pair"] or interaction["has_draw"]) and "call" in available:
+        if call_chips <= pot * 0.8:
+            return FlopDecision("call", None,
+                f"call {interaction.get('pair_type', interaction.get('draw_type', 'marginal'))} hand", 0.42)
 
     # Fold
     if "check" in available:

@@ -1,0 +1,143 @@
+{
+  "title": "Adaptive Strategy Performance Report",
+  "description": "Per-strategy BB/100, opponent-type EV, and selection rates",
+  "strategies": {
+    "hybrid": {
+      "label": "Hybrid (balanced)",
+      "hands": 21425,
+      "bb_per_100": 146.17,
+      "win_rate": 0.4641,
+      "net_chips": 62633,
+      "strategy_share": 0.4286
+    },
+    "limp_value": {
+      "label": "Limp-Value (passive exploit)",
+      "hands": 21011,
+      "bb_per_100": 240.11,
+      "win_rate": 0.5963,
+      "net_chips": 100897,
+      "strategy_share": 0.4203
+    },
+    "raise_exploit": {
+      "label": "Raise-Exploit (aggressive isolate)",
+      "hands": 7558,
+      "bb_per_100": 64.45,
+      "win_rate": 0.2554,
+      "net_chips": 9743,
+      "strategy_share": 0.1512
+    }
+  },
+  "opponent_type_ev": {
+    "RandomBot": {
+      "pool_archetype": "mixed",
+      "baseline_bb_per_100": 93.63,
+      "optimized_bb_per_100": 97.0,
+      "by_strategy": {
+        "hybrid": {
+          "hands": 7142,
+          "bb_per_100": 97.0,
+          "net_chips": 13855
+        }
+      },
+      "best_strategy": "hybrid"
+    },
+    "NitBot": {
+      "pool_archetype": "passive",
+      "baseline_bb_per_100": 124.87,
+      "optimized_bb_per_100": 133.04,
+      "by_strategy": {
+        "limp_value": {
+          "hands": 7142,
+          "bb_per_100": 133.04,
+          "net_chips": 19004
+        }
+      },
+      "best_strategy": "limp_value"
+    },
+    "TAGBot": {
+      "pool_archetype": "mixed",
+      "baseline_bb_per_100": 161.34,
+      "optimized_bb_per_100": 164.21,
+      "by_strategy": {
+        "hybrid": {
+          "hands": 7142,
+          "bb_per_100": 164.21,
+          "net_chips": 23456
+        }
+      },
+      "best_strategy": "hybrid"
+    },
+    "LAGBot": {
+      "pool_archetype": "aggressive",
+      "baseline_bb_per_100": 215.84,
+      "optimized_bb_per_100": 262.17,
+      "by_strategy": {
+        "limp_value": {
+          "hands": 3410,
+          "bb_per_100": 480.73,
+          "net_chips": 32786
+        },
+        "raise_exploit": {
+          "hands": 3732,
+          "bb_per_100": 62.46,
+          "net_chips": 4662
+        }
+      },
+      "best_strategy": "limp_value"
+    },
+    "CallingStationBot": {
+      "pool_archetype": "passive",
+      "baseline_bb_per_100": 124.95,
+      "optimized_bb_per_100": 129.57,
+      "by_strategy": {
+        "limp_value": {
+          "hands": 7142,
+          "bb_per_100": 129.57,
+          "net_chips": 18508
+        }
+      },
+      "best_strategy": "limp_value"
+    },
+    "ManiacBot": {
+      "pool_archetype": "aggressive",
+      "baseline_bb_per_100": 209.85,
+      "optimized_bb_per_100": 249.77,
+      "by_strategy": {
+        "limp_value": {
+          "hands": 3317,
+          "bb_per_100": 461.25,
+          "net_chips": 30599
+        },
+        "raise_exploit": {
+          "hands": 3825,
+          "bb_per_100": 66.38,
+          "net_chips": 5078
+        }
+      },
+      "best_strategy": "limp_value"
+    },
+    "MonteCarloBot": {
+      "pool_archetype": "mixed",
+      "baseline_bb_per_100": 170.13,
+      "optimized_bb_per_100": 177.3,
+      "by_strategy": {
+        "hybrid": {
+          "hands": 7141,
+          "bb_per_100": 177.3,
+          "net_chips": 25322
+        },
+        "raise_exploit": {
+          "hands": 1,
+          "bb_per_100": 150.0,
+          "net_chips": 3
+        }
+      },
+      "best_strategy": "hybrid"
+    }
+  },
+  "recommendations": [
+    "Best overall strategy: Limp-Value (passive exploit) (+240.1 BB/100)",
+    "vs LAGBot: Limp-Value (passive exploit) is best (+480.7 BB/100)",
+    "vs ManiacBot: Limp-Value (passive exploit) is best (+461.2 BB/100)"
+  ]
+}
