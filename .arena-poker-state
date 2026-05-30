@@ -1,0 +1,13 @@
+{
+  "hands_played": 2,
+  "bankroll": 0,
+  "last_action": {
+    "action": "raise",
+    "amount": 390,
+    "at": 1780116494
+  },
+  "timeout_count": 0,
+  "rejection_count": 0,
+  "stale_count": 0,
+  "iterations": []
+}

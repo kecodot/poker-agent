@@ -1,0 +1,48 @@
+# Credentials & secrets
+.arena-credentials
+.arena-credentials.*
+.env
+*.pem
+*.key
+credentials.json
+secrets.yaml
+
+# Virtual environment
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Database files
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.sqlite
+data/*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Generated reports
+reports/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dashboard runtime
+nohup.out
+/tmp/dashboard.log
