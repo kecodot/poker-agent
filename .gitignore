@@ -32,6 +32,21 @@ logs/
 # Generated reports
 reports/
 
+# Arena observability data (runtime generated)
+arena_matches/*.jsonl
+arena_matches/*.gz
+arena_matches/archive/
+arena_errors/*.jsonl
+arena_errors/*.gz
+arena_sessions/*.json
+arena_reports/*.md
+arena_population/profiles.json
+arena_population/history.jsonl
+arena_test_log.txt
+
+# Arena runtime state
+.arena-poker-state
+
 # IDE
 .vscode/
 .idea/

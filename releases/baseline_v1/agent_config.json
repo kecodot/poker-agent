@@ -1,0 +1,29 @@
+{
+  "monte_carlo_sims": 5000,
+  "max_decision_time_ms": 50,
+  "log_hands": true,
+  "log_dir": "logs",
+  "opponent_model_path": "logs/opponents.json",
+  "strategy": {
+    "preflop_aggression": 0.7,
+    "cbet_frequency_dry": 0.65,
+    "cbet_frequency_wet": 0.45,
+    "bluff_frequency_river": 0.28,
+    "thin_value_river": true
+  },
+  "ranges": {
+    "expand_vs_nits": true,
+    "tighten_vs_3bet": true,
+    "adjust_to_opponent": true
+  },
+  "performance": {
+    "monte_carlo_workers": 4,
+    "equity_cache_size": 1000,
+    "decision_timeout_ms": 300
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "json",
+    "rotate_days": 7
+  }
+}

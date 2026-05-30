@@ -21,10 +21,25 @@ if str(_here) not in sys.path:
 from arena_client import (
     ArenaClient,
     ArenaError,
+    CREDS_PATH,
     append_iteration,
     load_state,
     save_state,
 )
+
+import json as _json
+
+# Arena observability logger
+try:
+    from src.observability.arena_logger import ArenaMatchLogger
+    from src.observability.population_analyzer import PopulationAnalyzer, get_analyzer
+    _arena_logger: "ArenaMatchLogger | None" = None
+    _pop_analyzer: "PopulationAnalyzer | None" = None
+except ImportError:
+    _arena_logger = None
+    ArenaMatchLogger = None
+    _pop_analyzer = None
+    PopulationAnalyzer = None
 
 # Re-create the _run_benchmark_loop function used by both agent.py (starter kit)
 # and mock.py. This is the shared benchmark loop.
@@ -133,6 +148,19 @@ def _run_benchmark_loop(
     credential_repair_used = False
     loop_start_monotonic = time.monotonic()
 
+    # Initialize arena observability logger
+    global _arena_logger, _pop_analyzer
+    if ArenaMatchLogger is not None and label != " (dry-run)":
+        _arena_logger = ArenaMatchLogger()
+        _arena_logger.start_session(competition_id, "pending")
+        _pop_analyzer = get_analyzer()
+    _our_agent_id = ""
+    try:
+        if CREDS_PATH.exists():
+            _our_agent_id = _json.loads(open(CREDS_PATH).read()).get("agentId", "")
+    except Exception:
+        pass
+
     _emit_heartbeat(phase="(starting)", completed=0, target="?", score=None,
                     pending_count=0, label=label, eta_str="")
     last_heartbeat_at = time.time()
@@ -144,8 +172,21 @@ def _run_benchmark_loop(
                 f"/texas/pending-actions?competitionId={competition_id}")
             tables = _validate_pending_tables(pending)
             tables = sorted(tables, key=lambda t: (t.get("actionDeadlineAt") or 0))
+
+            # Scrape opponent population data from recentEvents
+            if _pop_analyzer is not None and tables:
+                try:
+                    for t in tables:
+                        _pop_analyzer.ingest_table_events(t, our_agent_id=_our_agent_id)
+                except Exception:
+                    pass
         except ArenaError as e:
             print(f"[arena-pokerkit] pending-actions error: {e}", file=sys.stderr)
+            if _arena_logger is not None:
+                try:
+                    _arena_logger.log_error("invalid_state", f"pending-actions: {e}")
+                except Exception:
+                    pass
             if e.status in (401, 403):
                 if not credential_repair_used and _attempt_credential_repair(client, args):
                     credential_repair_used = True
@@ -176,19 +217,40 @@ def _run_benchmark_loop(
                     "at": int(time.time()),
                 }
                 save_state(state)
+                # Log to arena observability
+                if _arena_logger is not None:
+                    try:
+                        _arena_logger.log_decision(table, action)
+                    except Exception:
+                        pass
             except ArenaError as e:
                 if e.status == 409:
                     state["stale_count"] = state.get("stale_count", 0) + 1
                     save_state(state)
+                    if _arena_logger is not None:
+                        try:
+                            _arena_logger.log_error("stale_action", str(e), table=table)
+                        except Exception:
+                            pass
                     continue
                 if e.status in (401, 403):
                     if not credential_repair_used and _attempt_credential_repair(client, args):
                         credential_repair_used = True
+                        if _arena_logger is not None:
+                            try:
+                                _arena_logger.log_error("reconnect", "credential repair attempted", table=table)
+                            except Exception:
+                                pass
                         continue
                     return 4
                 if e.status == 400:
                     state["rejection_count"] = state.get("rejection_count", 0) + 1
                     save_state(state)
+                    if _arena_logger is not None:
+                        try:
+                            _arena_logger.log_error("failed_action", str(e), table=table, raw=payload)
+                        except Exception:
+                            pass
                     try:
                         client.post("/texas/action", {
                             "tableId": table["tableId"],
@@ -214,6 +276,11 @@ def _run_benchmark_loop(
                     f"/texas/benchmark/status?competitionId={competition_id}")
             except ArenaError as e:
                 print(f"[arena-pokerkit] status refresh error: {e}", file=sys.stderr)
+                if _arena_logger is not None:
+                    try:
+                        _arena_logger.log_error("reconnect", f"status refresh: {e}")
+                    except Exception:
+                        pass
                 if e.status in (401, 403):
                     if not credential_repair_used and _attempt_credential_repair(client, args):
                         credential_repair_used = True
@@ -246,6 +313,19 @@ def _run_benchmark_loop(
                     print(f"[arena-pokerkit{label}] match terminal ({phase}/{msstatus}) | "
                           f"hands={match.get('completedHands')} | "
                           f"adjustedBbPer100={match.get('adjustedBbPer100')}")
+                    # End arena session logger
+                    if _arena_logger is not None:
+                        try:
+                            _arena_logger.end_session(match)
+                            _arena_logger.generate_daily_report()
+                        except Exception:
+                            pass
+                    # Generate population report
+                    if _pop_analyzer is not None:
+                        try:
+                            _pop_analyzer.generate_report()
+                        except Exception:
+                            pass
                     return 0
 
         if not tables:
